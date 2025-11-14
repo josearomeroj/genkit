@@ -16,12 +16,61 @@ package evaluators_test
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/genkit"
 	"github.com/firebase/genkit/go/plugins/evaluators"
 )
+
+func newMockJudgeLLM(modelName, response string, err error) ai.Model {
+	return ai.NewModel(
+		modelName,
+		&ai.ModelOptions{
+			Supports: &ai.ModelSupports{Multiturn: true},
+		},
+		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
+			if err != nil {
+				return nil, err
+			}
+			return &ai.ModelResponse{Message: ai.NewModelTextMessage(response)}, nil
+		},
+	)
+}
+
+func newMockJudgeLLMWithSequence(modelName string, responses []string) ai.Model {
+	callCount := 0
+	return ai.NewModel(
+		modelName,
+		&ai.ModelOptions{
+			Supports: &ai.ModelSupports{Multiturn: true},
+		},
+		func(ctx context.Context, req *ai.ModelRequest, cb ai.ModelStreamCallback) (*ai.ModelResponse, error) {
+			response := responses[callCount%len(responses)]
+			callCount++
+			return &ai.ModelResponse{Message: ai.NewModelTextMessage(response)}, nil
+		},
+	)
+}
+
+func newDumbEmbedder(t *testing.T, num int) ai.Embedder {
+	t.Helper()
+
+	embeddings := make([]*ai.Embedding, num)
+	for i := range embeddings {
+		embeddings[i] = &ai.Embedding{Embedding: []float32{1}}
+	}
+
+	return ai.NewEmbedder(
+		t.Name(),
+		nil,
+		func(ctx context.Context, req *ai.EmbedRequest) (*ai.EmbedResponse, error) {
+			return &ai.EmbedResponse{Embeddings: embeddings}, nil
+		},
+	)
+}
 
 func TestEvaluators(t *testing.T) {
 	ctx := context.Background()
@@ -166,4 +215,58 @@ func TestEvaluators(t *testing.T) {
 			t.Errorf("got %v, want error", got)
 		}
 	})
+}
+
+func TestConfigureEvaluators(t *testing.T) {
+	cases := []struct {
+		name          string
+		config        evaluators.MetricConfig
+		expectedError string
+	}{
+		{name: "valid config", config: evaluators.MetricConfig{MetricType: evaluators.EvaluatorRegex}},
+		{name: "valid config", config: evaluators.MetricConfig{MetricType: evaluators.EvaluatorJsonata}},
+		{name: "valid config", config: evaluators.MetricConfig{MetricType: evaluators.EvaluatorDeepEqual}},
+
+		{name: "valid config", config: evaluators.MetricConfig{
+			JudgeLLM:   newMockJudgeLLM("t1", "r", nil),
+			MetricType: evaluators.EvaluatorAnswerAccuracy,
+		}},
+		{name: "invalid config", config: evaluators.MetricConfig{
+			JudgeLLM:   nil,
+			MetricType: evaluators.EvaluatorAnswerAccuracy,
+		}, expectedError: "judgeLLM cannot be nil"},
+
+		{name: "valid config", config: evaluators.MetricConfig{
+			JudgeLLM:   newMockJudgeLLM("t2", "r", nil),
+			Embedder:   newDumbEmbedder(t, 1),
+			MetricType: evaluators.EvaluatorAnswerRelevancy,
+		}},
+		{name: "invalid config, missing LLM", config: evaluators.MetricConfig{
+			JudgeLLM:   nil,
+			Embedder:   newDumbEmbedder(t, 1),
+			MetricType: evaluators.EvaluatorAnswerRelevancy,
+		}, expectedError: "judgeLLM cannot be nil"},
+		{name: "invalid config, missing embedder", config: evaluators.MetricConfig{
+			JudgeLLM:   newMockJudgeLLM("t3", "r", nil),
+			Embedder:   nil,
+			MetricType: evaluators.EvaluatorAnswerRelevancy,
+		}, expectedError: "embedder cannot be nil"},
+	}
+
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("%s/%s", c.name, c.config.MetricType.String()), func(t *testing.T) {
+			evaluator, err := evaluators.ConfigureMetric(c.config)
+			if c.expectedError != "" {
+				if err == nil {
+					t.Errorf("expected error %q, got nil", c.expectedError)
+				}
+
+				if !strings.Contains(err.Error(), c.expectedError) {
+					t.Errorf("expected error substring %q, got %q", c.expectedError, err.Error())
+				}
+			} else if evaluator == nil {
+				t.Error("expected evaluator, got nil")
+			}
+		})
+	}
 }

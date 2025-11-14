@@ -28,12 +28,18 @@ const (
 	EvaluatorDeepEqual EvaluatorType = iota
 	EvaluatorRegex
 	EvaluatorJsonata
+	EvaluatorAnswerAccuracy
+	EvaluatorAnswerRelevancy
+	EvaluatorMaliciousness
 )
 
 var evaluatorTypeName = map[EvaluatorType]string{
-	EvaluatorDeepEqual: "DEEP_EQUAL",
-	EvaluatorRegex:     "REGEX",
-	EvaluatorJsonata:   "JSONATA",
+	EvaluatorDeepEqual:       "DEEP_EQUAL",
+	EvaluatorRegex:           "REGEX",
+	EvaluatorJsonata:         "JSONATA",
+	EvaluatorAnswerAccuracy:  "ANSWER_ACCURACY",
+	EvaluatorAnswerRelevancy: "ANSWER_RELEVANCY",
+	EvaluatorMaliciousness:   "MALICIOUSNESS",
 }
 
 func (ss EvaluatorType) String() string {
@@ -44,6 +50,8 @@ func (ss EvaluatorType) String() string {
 // Params (judge LLMs, etc.) could be configured by extending this struct
 type MetricConfig struct {
 	MetricType EvaluatorType
+	JudgeLLM   ai.ModelArg
+	Embedder   ai.EmbedderArg
 }
 
 // GenkitEval is a Genkit plugin that provides evaluators
@@ -58,35 +66,50 @@ func (ge *GenkitEval) Name() string {
 }
 
 // Init initializes the plugin.
-func (ge *GenkitEval) Init(ctx context.Context) []api.Action {
+func (ge *GenkitEval) Init(_ context.Context) []api.Action {
 	if ge == nil {
 		ge = &GenkitEval{}
 	}
+
 	ge.mu.Lock()
 	defer ge.mu.Unlock()
 	if ge.initted {
 		panic("genkitEval.Init already called")
 	}
-	if ge == nil || len(ge.Metrics) == 0 {
+
+	if len(ge.Metrics) == 0 {
 		panic("genkitEval: need to configure at least one metric")
 	}
+
 	ge.initted = true
 
 	var actions []api.Action
 	for _, metric := range ge.Metrics {
-		actions = append(actions, ConfigureMetric(metric).(api.Action))
+		m, err := ConfigureMetric(metric)
+		if err != nil {
+			panic("genkitEval: error configuring metric: " + err.Error())
+		}
+
+		actions = append(actions, m.(api.Action))
 	}
+
 	return actions
 }
 
-func ConfigureMetric(metric MetricConfig) ai.Evaluator {
+func ConfigureMetric(metric MetricConfig) (ai.Evaluator, error) {
 	switch metric.MetricType {
 	case EvaluatorDeepEqual:
-		return configureDeepEqualEvaluator()
+		return configureDeepEqualEvaluator(), nil
 	case EvaluatorJsonata:
-		return configureJsonataEvaluator()
+		return configureJsonataEvaluator(), nil
 	case EvaluatorRegex:
-		return configureRegexEvaluator()
+		return configureRegexEvaluator(), nil
+	case EvaluatorAnswerAccuracy:
+		return configureAnswerAccuracyEvaluator(metric.JudgeLLM)
+	case EvaluatorAnswerRelevancy:
+		return configureAnswerRelevancyEvaluator(metric.JudgeLLM, metric.Embedder)
+	case EvaluatorMaliciousness:
+		return configureMaliciousnessEvaluator(metric.JudgeLLM)
 	default:
 		panic(fmt.Sprintf("Unsupported genkitEval metric type: %s", metric.MetricType.String()))
 	}
@@ -181,6 +204,7 @@ func configureJsonataEvaluator() ai.Evaluator {
 		Definition:  "Tests JSONata expression (provided in reference) against output",
 		IsBilled:    false,
 	}
+
 	return ai.NewEvaluator(api.NewName(provider, "jsonata"), &evalOptions, func(ctx context.Context, req *ai.EvaluatorCallbackRequest) (*ai.EvaluatorCallbackResponse, error) {
 		dataPoint := req.Input
 		var score ai.Score

@@ -32,10 +32,15 @@ import (
 // JSONString returns json.Marshal(x) as a string. If json.Marshal returns
 // an error, jsonString returns the error text as a JSON string beginning "ERROR:".
 func JSONString(x any) string {
+	if s, ok := x.(string); ok {
+		return s
+	}
+
 	bytes, err := json.Marshal(x)
 	if err != nil {
 		bytes, _ = json.Marshal(fmt.Sprintf("ERROR: %v", err))
 	}
+
 	return string(bytes)
 }
 
@@ -43,10 +48,15 @@ func JSONString(x any) string {
 // If json.MarshalIndent returns an error, jsonString returns the error text as
 // a JSON string beginning "ERROR:".
 func PrettyJSONString(x any) string {
+	if s, ok := x.(string); ok {
+		return s
+	}
+
 	bytes, err := json.MarshalIndent(x, "", "  ")
 	if err != nil {
 		bytes, _ = json.MarshalIndent(fmt.Sprintf("ERROR: %v", err), "", "  ")
 	}
+
 	return string(bytes)
 }
 
